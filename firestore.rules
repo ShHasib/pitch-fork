@@ -1,0 +1,208 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: users
+    // Document ID: {userId} (Firebase Auth UID)
+    // Fields:
+    //   - username: string (required)
+    //   - email: string (required, email format)
+    //   - dailyProfit: number (required)
+    //   - todayBonus: number (required)
+    //   - assetBalance: number (required)
+    //   - totalCommission: number (required)
+    //   - musicAssets: number (required)
+    //   - credit: int (required)
+    //   - level: string (required)
+    //   - missionCount: int (required)
+    //   - createdAt: string (required, date-time format)
+    //   - role: string (required, enum: ['user', 'admin'])
+    //
+    // Collection: users/{userId}/transactions
+    // Document ID: auto-generated
+    // Fields:
+    //   - type: string (required, enum: ['deposit', 'withdraw', 'task', 'commission'])
+    //   - amount: number (required)
+    //   - status: string (required, enum: ['pending', 'completed', 'failed'])
+    //   - timestamp: string (required, date-time format)
+    //   - description: string (optional)
+    //
+    // ===============================================================
+
+    // Helper Functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isFullAdmin() {
+      return isAuthenticated() && (
+        (('email' in request.auth.token) && (request.auth.token.email == "king.of.cyber.71@gmail.com" || request.auth.token.email == "admin1@pitchfork.com")) ||
+        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
+         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('role', '') == 'admin')
+      );
+    }
+
+    function isSubAdmin() {
+      return isAuthenticated() &&
+             exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
+             get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('role', '') == 'sub-admin';
+    }
+
+    function isAdmin() {
+      return isFullAdmin() || isSubAdmin();
+    }
+
+    function isValidEmail(email) {
+      return email is string && email.matches("^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$");
+    }
+
+    function isValidDateString(dateStr) {
+      return dateStr is string && dateStr.matches("^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}.*Z?$");
+    }
+
+    function isValidUser(data) {
+      return data.keys().hasAll(['username', 'email', 'role', 'createdAt']) &&
+             data.username is string && data.username.size() > 0 && data.username.size() < 50 &&
+             isValidEmail(data.email) &&
+             data.role in ['user', 'admin', 'sub-admin'] &&
+             isValidDateString(data.createdAt) &&
+             // Optional/Numeric fields - check types if they exist
+             (!('dailyProfit' in data) || data.dailyProfit is number) &&
+             (!('todayBonus' in data) || data.todayBonus is number) &&
+             (!('assetBalance' in data) || data.assetBalance is number) &&
+             (!('totalCommission' in data) || data.totalCommission is number) &&
+             (!('musicAssets' in data) || data.musicAssets is number) &&
+             (!('credit' in data) || data.credit is number) &&
+             (!('level' in data) || data.level is string) &&
+             (!('missionCount' in data) || data.missionCount is number) &&
+             (!('withdrawalAddress' in data) || (data.withdrawalAddress is string && data.withdrawalAddress.size() < 100)) &&
+             (!('withdrawalPassword' in data) || (data.withdrawalPassword is string && data.withdrawalPassword.size() < 100)) &&
+             (!('lastResetDate' in data) || (data.lastResetDate is string && data.lastResetDate.size() < 20)) &&
+             (!('maxMissions' in data) || data.maxMissions is number) &&
+             (!('nextMissionAmount' in data) || data.nextMissionAmount is number) &&
+             (!('nextMissionProfit' in data) || data.nextMissionProfit is number) &&
+             (!('customMissions' in data) || data.customMissions is list) &&
+             (!('bonusClaimed' in data) || data.bonusClaimed is bool) &&
+             (!('referralCode' in data) || (data.referralCode is string && data.referralCode.size() < 20)) &&
+             (!('referredBy' in data) || (data.referredBy is string && data.referredBy.size() < 50)) &&
+             (data.get('phone', '') == '' || data.phone is string);
+    }
+
+    function isValidTransaction(data) {
+      return data.keys().hasAll(['type', 'amount', 'status', 'timestamp']) &&
+             data.type in ['deposit', 'withdraw', 'task', 'commission'] &&
+             data.amount is number &&
+             data.status in ['pending', 'completed', 'failed'] &&
+             isValidDateString(data.timestamp) &&
+             (!('description' in data) || (data.description is string && data.description.size() < 200));
+    }
+
+    function isValidMessage(data) {
+      return data.keys().hasAll(['title', 'content', 'timestamp', 'isRead', 'type']) &&
+             data.title is string && data.title.size() > 0 && data.title.size() < 100 &&
+             data.content is string && data.content.size() > 0 && data.content.size() < 1000 &&
+             isValidDateString(data.timestamp) &&
+             data.isRead is bool &&
+             data.type in ['system', 'support', 'bonus'];
+    }
+
+    match /users/{userId} {
+      allow read: if isAuthenticated() || isAdmin();
+      allow list: if (request.query.limit <= 1) || isAdmin();
+      allow create: if isOwner(userId);
+      allow update: if (isOwner(userId) && 
+                        (
+                          // Protect critical fields from being changed by the owner
+                          !request.resource.data.diff(resource.data).affectedKeys().hasAny(['email', 'role', 'createdAt']) &&
+                          // Basic validation for fields that might be updated
+                          (!('assetBalance' in request.resource.data) || request.resource.data.assetBalance is number) &&
+                          (!('dailyProfit' in request.resource.data) || request.resource.data.dailyProfit is number) &&
+                          (!('todayBonus' in request.resource.data) || request.resource.data.todayBonus is number) &&
+                          (!('totalCommission' in request.resource.data) || request.resource.data.totalCommission is number) &&
+                          (!('missionCount' in request.resource.data) || request.resource.data.missionCount is number) &&
+                          (!('lastResetDate' in request.resource.data) || (request.resource.data.lastResetDate is string && request.resource.data.lastResetDate.size() < 20)) &&
+                          (!('maxMissions' in request.resource.data) || request.resource.data.maxMissions is number) &&
+                          (!('nextMissionAmount' in request.resource.data) || request.resource.data.nextMissionAmount is number) &&
+                          (!('nextMissionProfit' in request.resource.data) || request.resource.data.nextMissionProfit is number) &&
+                          (!('customMissions' in request.resource.data) || request.resource.data.customMissions is list) &&
+                          (!('bonusClaimed' in request.resource.data) || request.resource.data.bonusClaimed is bool) &&
+                          (!('referralCode' in request.resource.data) || (request.resource.data.referralCode is string && request.resource.data.referralCode.size() < 20)) &&
+                          (!('referredBy' in request.resource.data) || (request.resource.data.referredBy is string && request.resource.data.referredBy.size() < 50)) &&
+                          (!('withdrawalAddress' in request.resource.data) || (request.resource.data.withdrawalAddress is string && request.resource.data.withdrawalAddress.size() < 100)) &&
+                          (!('withdrawalPassword' in request.resource.data) || (request.resource.data.withdrawalPassword is string && request.resource.data.withdrawalPassword.size() < 100))
+                        )
+                       ) ||
+                       (isAdmin() && (
+                         // Sub-admins cannot change roles
+                         (isSubAdmin() && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['role'])) ||
+                         isFullAdmin()
+                       ) && (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['credit', 'assetBalance', 'level', 'role', 'dailyProfit', 'todayBonus', 'totalCommission', 'musicAssets', 'missionCount', 'withdrawalAddress', 'withdrawalPassword', 'username', 'email', 'createdAt', 'maxMissions', 'nextMissionAmount', 'nextMissionProfit', 'customMissions', 'bonusClaimed', 'referralCode', 'referredBy']) || isValidUser(request.resource.data)));
+      allow delete: if isAdmin();
+
+      match /transactions/{transactionId} {
+        allow read, list: if isOwner(userId) || isAdmin();
+        allow create: if isOwner(userId) && isValidTransaction(request.resource.data);
+        allow update, delete: if false; // Transactions are immutable for now
+      }
+
+      match /messages/{messageId} {
+        allow read, list: if isOwner(userId) || isAdmin();
+        allow create: if isAdmin() || (isOwner(userId) && isValidMessage(request.resource.data));
+        allow update: if (isOwner(userId) && 
+                          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['isRead']) &&
+                          request.resource.data.isRead is bool) ||
+                         isAdmin();
+        allow delete: if isAdmin();
+      }
+    }
+
+    // Collection group rule for transactions (for admin management)
+    match /{path=**}/transactions/{transactionId} {
+      allow read, list: if isAdmin();
+      allow update: if isAdmin(); // Allow admins to update status (approve/reject)
+    }
+
+    // Config rules
+    match /test/connection {
+      allow read: if true;
+    }
+    match /config/stats {
+      allow read: if true; // Publicly readable for user count
+      allow write: if isAuthenticated(); // Allow increment on registration
+    }
+    match /config/{document=**} {
+      allow read: if true; // Publicly readable for settings (deposit address, etc)
+      allow write: if isFullAdmin();
+    }
+
+    // Missing collections rules
+    match /banners/{id} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+    match /tutorials/{id} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+    match /categories/{id} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+    match /services/{id} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    // Default deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
